@@ -18,6 +18,56 @@ import { supabase } from "./lib/supabase";
 const STORAGE_KEY = "gitprofiles.profile-studio.v2";
 type Pane = "editor" | "preview";
 type Notice = { type: "success" | "error" | "info"; text: string } | null;
+type GithubLanguage = { name: string; repositories: number; share: number };
+type GithubShowcase = { username: string; publicRepositories: number; languages: GithubLanguage[]; readme: string };
+type GithubStatus = "idle" | "loading" | "ready" | "error";
+
+const githubCache = new Map<string, { savedAt: number; value: GithubShowcase }>();
+
+function githubUsernameFrom(value: string): string {
+  const username = value.trim().replace(/^@/, "").replace(/^https?:\/\/(?:www\.)?github\.com\//i, "").split(/[/?#]/)[0] ?? "";
+  return /^[a-z0-9-]{1,39}$/i.test(username) ? username : "";
+}
+
+async function loadGithubShowcase(value: string): Promise<GithubShowcase> {
+  const username = githubUsernameFrom(value);
+  if (!username) throw new Error("Enter a valid GitHub username to import public profile data.");
+  const cacheKey = username.toLowerCase();
+  const cached = githubCache.get(cacheKey);
+  if (cached && Date.now() - cached.savedAt < 5 * 60 * 1000) return cached.value;
+  const headers = { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2026-03-10" };
+  const encodedUsername = encodeURIComponent(username);
+  const [repositoriesResponse, readmeResponse] = await Promise.all([
+    fetch(`https://api.github.com/users/${encodedUsername}/repos?per_page=100&sort=updated&type=owner`, { headers }),
+    fetch(`https://api.github.com/repos/${encodedUsername}/${encodedUsername}/readme`, { headers })
+  ]);
+  if (repositoriesResponse.status === 404) throw new Error("That GitHub profile was not found.");
+  if (repositoriesResponse.status === 403 || repositoriesResponse.status === 429) throw new Error("GitHub is rate limiting public requests. Try again in a little while.");
+  if (!repositoriesResponse.ok) throw new Error("Public GitHub repositories could not be loaded.");
+  const repositories = await repositoriesResponse.json() as Array<{ fork?: boolean; language?: string | null }>;
+  if (!Array.isArray(repositories)) throw new Error("GitHub returned an unexpected repository list.");
+  const ownedRepositories = repositories.filter((repository) => !repository.fork);
+  const counts = new Map<string, number>();
+  for (const repository of ownedRepositories) {
+    if (repository.language) counts.set(repository.language, (counts.get(repository.language) ?? 0) + 1);
+  }
+  const languageTotal = [...counts.values()].reduce((sum, count) => sum + count, 0);
+  const languages = [...counts.entries()]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .slice(0, 6)
+    .map(([name, count]) => ({ name, repositories: count, share: Math.max(4, Math.round(count / languageTotal * 100)) }));
+  let readme = "";
+  if (readmeResponse.ok) {
+    const file = await readmeResponse.json() as { content?: string; encoding?: string };
+    if (file.encoding === "base64" && file.content) {
+      const bytes = Uint8Array.from(atob(file.content.replace(/\s/g, "")), (character) => character.charCodeAt(0));
+      readme = new TextDecoder().decode(bytes).slice(0, 8000);
+    }
+  }
+  const result = { username, publicRepositories: ownedRepositories.length, languages, readme };
+  githubCache.set(cacheKey, { savedAt: Date.now(), value: result });
+  return result;
+}
 
 function initialProfile(): Profile {
   const shared = readSharedProfile(window.location.href);
@@ -55,6 +105,26 @@ function copyText(value: string): Promise<void> {
     field.remove();
     copied ? resolve() : reject(new Error("Clipboard unavailable"));
   });
+}
+
+function isNetworkFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : typeof error === "object" && error !== null && "message" in error ? String(error.message) : String(error);
+  return /networkerror|failed to fetch|fetch failed|load failed|network request failed/i.test(message);
+}
+
+async function withSupabaseRetry<T>(operation: () => Promise<T>, message: string): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (!isNetworkFailure(error) || attempt === 2) break;
+      await new Promise((resolve) => window.setTimeout(resolve, 450 * (attempt + 1)));
+    }
+  }
+  if (isNetworkFailure(lastError)) throw new Error(message);
+  throw lastError;
 }
 
 function saveProfileLocally(profile: Profile): boolean {
@@ -133,10 +203,44 @@ function App() {
   const [shareUrl, setShareUrl] = useState("");
   const [embedMode, setEmbedMode] = useState<"markdown" | "html">("markdown");
   const [avatarBusy, setAvatarBusy] = useState(false);
+  const [githubData, setGithubData] = useState<GithubShowcase | null>(null);
+  const [githubStatus, setGithubStatus] = useState<GithubStatus>("idle");
+  const [githubError, setGithubError] = useState("");
+  const [githubRefresh, setGithubRefresh] = useState(0);
   const lastPublishedFingerprint = useRef("");
   const autoSaveQueue = useRef<Promise<void>>(Promise.resolve());
   const embedCode = useMemo(() => embedMode === "markdown" ? markdownEmbed(profile, shareUrl) : htmlEmbed(profile, shareUrl), [embedMode, profile, shareUrl]);
   const rootStyle = { "--accent": profile.accent, "--profile-background": backgroundStyle(profile) } as CSSProperties;
+  const githubUsername = githubUsernameFrom(profile.socials.github);
+
+  useEffect(() => {
+    let active = true;
+    if (!githubUsername) {
+      setGithubData(null);
+      setGithubStatus("idle");
+      setGithubError("");
+      return () => { active = false; };
+    }
+    setGithubData(null);
+    setGithubStatus("loading");
+    setGithubError("");
+    const timer = window.setTimeout(() => {
+      void loadGithubShowcase(githubUsername).then((data) => {
+        if (!active) return;
+        setGithubData(data);
+        setGithubStatus("ready");
+      }).catch((error: unknown) => {
+        if (!active) return;
+        setGithubData(null);
+        setGithubStatus("error");
+        setGithubError(error instanceof Error ? error.message : "GitHub profile data could not be loaded.");
+      });
+    }, 350);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [githubUsername, githubRefresh]);
 
   useEffect(() => {
     if (!supabase) {
@@ -206,7 +310,7 @@ function App() {
       autoSaveQueue.current = autoSaveQueue.current.catch(() => {}).then(async () => {
         if (!active) return;
         try {
-          await publishProfile(session.user.id, profile);
+          await withSupabaseRetry(() => publishProfile(session.user.id, profile), "Profil güncellenemedi. Supabase bağlantısını kontrol edip tekrar dene.");
           if (active) lastPublishedFingerprint.current = serialized;
         } catch (error) {
           if (active) setNotice({ type: "error", text: error instanceof Error ? error.message : "Live profile update failed." });
@@ -319,7 +423,7 @@ function App() {
     setAvatarBusy(true);
     try {
       const optimized = await optimizeImage(file, session ? 640 : 180);
-      const avatar = session ? await uploadProfileMedia(session.user.id, optimized, "avatar") : await fileDataUrl(optimized);
+      const avatar = session ? await withSupabaseRetry(() => uploadProfileMedia(session.user.id, optimized, "avatar"), "Profil görseli yüklenemedi. Supabase bağlantısını kontrol edip tekrar dene.") : await fileDataUrl(optimized);
       update("avatar", avatar);
       setNotice({ type: "success", text: session ? "Profil fotoğrafı hesabına yüklendi." : "Profil fotoğrafı tarayıcı için küçültüldü." });
     } catch (error) {
@@ -342,7 +446,7 @@ function App() {
         setProfile((current) => ({ ...current, backgroundKind: "video", backgroundVideo: url, backgroundImage: "" }));
       } else {
         const optimized = await optimizeImage(file, 2200);
-        const url = await uploadProfileMedia(session.user.id, optimized, "background");
+        const url = await withSupabaseRetry(() => uploadProfileMedia(session.user.id, optimized, "background"), "Arka plan yüklenemedi. Supabase bağlantısını kontrol edip tekrar dene.");
         setProfile((current) => ({ ...current, backgroundKind: "image", backgroundImage: url, backgroundVideo: "" }));
       }
       setNotice({ type: "success", text: "Arka plan medyası yüklenip profiline eklendi." });
@@ -418,10 +522,10 @@ function App() {
         const response = await fetch(candidate.avatar);
         const blob = await response.blob();
         const avatarFile = new File([blob], "profile-avatar.webp", { type: blob.type || "image/webp" });
-        candidate = { ...candidate, avatar: await uploadProfileMedia(session.user.id, avatarFile, "avatar") };
+        candidate = { ...candidate, avatar: await withSupabaseRetry(() => uploadProfileMedia(session.user.id, avatarFile, "avatar"), "Profil görseli yüklenemedi. Supabase bağlantısını kontrol edip tekrar dene.") };
         setProfile(candidate);
       }
-      await publishProfile(session.user.id, candidate);
+      await withSupabaseRetry(() => publishProfile(session.user.id, candidate), "Profil Supabase'e gönderilemedi. İnternet bağlantını ve Supabase erişimini kontrol edip tekrar dene.");
       lastPublishedFingerprint.current = JSON.stringify(candidate);
       setIsPublished(true);
       const publicOrigin = import.meta.env.VITE_PUBLIC_URL?.replace(/\/$/, "") || (window.location.protocol === "file:" ? "https://gitprofiles.xyz" : window.location.origin);
@@ -478,7 +582,7 @@ function App() {
   if (publicMode) {
     return <div className="public-shell min-h-screen" style={rootStyle}>
       <header className="public-nav"><Brand /><a className="button button-quiet" href="/">Make your page <ArrowUpRight size={14} /></a></header>
-      <ProfileScene profile={profile} publicMode />
+      <ProfileScene profile={profile} publicMode githubData={githubData} />
       <div className="public-credit">A personal page by <b>gitprofiles.xyz</b></div>
     </div>;
   }
@@ -583,6 +687,26 @@ function App() {
             </div>
           </section>
 
+          <section className="editor-card">
+            <div className="section-title-row">
+              <SectionTitle icon={<SocialGlyph kind="github" />} title="GitHub profile" detail="Public languages and your profile README.md." />
+              <button className="button button-add" onClick={() => setGithubRefresh((value) => value + 1)} disabled={!githubUsername || githubStatus === "loading"}><RotateCcw size={13} /> Refresh</button>
+            </div>
+            {!githubUsername && <p className="fine-print">Add a GitHub username above to load public repositories and the matching README.md.</p>}
+            {githubStatus === "loading" && <p className="fine-print" role="status">Loading public repositories and README.md…</p>}
+            {githubStatus === "error" && <p className="fine-print" role="status">{githubError}</p>}
+            {githubStatus === "ready" && githubData && <div className="mt-3 grid gap-3">
+              <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--soft)]"><span><b className="text-[var(--accent)]">{githubData.publicRepositories}</b> public repositories</span><span><b className="text-[var(--accent)]">{githubData.languages.length}</b> languages used</span><span><b className="text-[var(--accent)]">{githubData.readme ? "Found" : "Not found"}</b> profile README.md</span></div>
+              <GithubLanguageList languages={githubData.languages} />
+              {githubData.readme ? <details className="rounded-md border border-white/10 bg-white/[.025] px-3 py-2">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs text-[var(--soft)]"><span className="font-mono text-[var(--accent)]">{githubData.username}/{githubData.username}/README.md</span><span>Preview</span></summary>
+                <pre className="mt-3 max-h-56 overflow-auto whitespace-pre-wrap break-words border-t border-white/10 pt-3 font-mono text-[11px] leading-relaxed text-[var(--muted)]">{githubData.readme}</pre>
+              </details> : <p className="fine-print">No public profile README.md was found in the matching repository.</p>}
+              <a className="w-fit text-xs text-[var(--accent)] underline-offset-4 hover:underline" href={`https://github.com/${encodeURIComponent(githubData.username)}/${encodeURIComponent(githubData.username)}#readme`} target="_blank" rel="noopener noreferrer">Open profile README on GitHub</a>
+            </div>}
+            <p className="fine-print">Language counts use each repository’s primary language across up to 100 public repositories.</p>
+          </section>
+
           <div className="editor-footer"><button className="reset-button" onClick={resetProfile}><RotateCcw size={13} /> Clear profile</button><span>{isPublished ? "Changes publish after a short save." : session ? "Publish once to create your public page." : "Changes stay in this browser."}</span></div>
         </aside>
 
@@ -592,7 +716,7 @@ function App() {
             <div className="browser-bar"><span className="browser-lights"><i /><i /><i /></span><span className="browser-address"><span className="lock-mark">⌑</span> gitprofiles.xyz/{profile.username || "your-name"}</span><span className="browser-menu">•••</span></div>
             <div className={"preview-viewport " + (device === "mobile" ? "mobile-device" : "")}>
               {device === "mobile" && <div className="phone-frame-top"><span /></div>}
-              <ProfileScene profile={profile} />
+              <ProfileScene profile={profile} githubData={githubData} />
             </div>
             <div className="browser-footer"><span><span className="preview-ready"><Check size={10} /></span> Link cards ready</span><span>{profile.links.length} links <i /> {Object.values(profile.socials).filter(Boolean).length} socials</span></div>
           </div>
@@ -712,7 +836,7 @@ function LazyBackgroundVideo({ source }: { source: string }) {
   return <video ref={videoRef} className="profile-background-video" autoPlay muted loop playsInline preload="none" aria-hidden="true" />;
 }
 
-function ProfileScene({ profile, publicMode = false }: { profile: Profile; publicMode?: boolean }) {
+function ProfileScene({ profile, publicMode = false, githubData }: { profile: Profile; publicMode?: boolean; githubData: GithubShowcase | null }) {
   const socials = (Object.keys(SOCIAL_LABELS) as SocialKey[]).filter((social) => profile.socials[social].trim() && socialHref(social, profile.socials[social]));
   const avatar = safeHttpUrl(profile.avatar) || (/^data:image\/(?:png|jpe?g|webp);base64,/i.test(profile.avatar) ? profile.avatar : "");
   const backgroundImage = safeHttpUrl(profile.backgroundImage);
@@ -735,8 +859,28 @@ function ProfileScene({ profile, publicMode = false }: { profile: Profile; publi
         </a>)}
         {!profile.links.some((link) => link.title.trim() && safeHttpUrl(link.url)) && <div className="profile-empty-link"><Link2 size={15} /> Add your first link from the editor</div>}
       </div>
+      {githubData && githubData.username.toLowerCase() === githubUsernameFrom(profile.socials.github).toLowerCase() && <section className="mt-4 border-t border-white/10 pt-3 text-left" aria-label="GitHub profile details">
+        <div className="mb-2 flex items-center justify-between gap-2"><span className="flex items-center gap-2 text-xs font-medium text-[#eef0e6]"><Code2 size={13} style={{ color: "var(--accent)" }} /> Languages in public repos</span><span className="font-mono text-[10px] text-[#9da79a]">{githubData.publicRepositories} repos</span></div>
+        <GithubLanguageList languages={githubData.languages} compact />
+        {githubData.readme && <details className="mt-3 rounded-md border border-white/10 bg-black/20 px-3 py-2">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-[11px] text-[#d0d7ca]"><span className="font-mono text-[var(--accent)]">README.md</span><span>Expand</span></summary>
+          <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-words border-t border-white/10 pt-2 font-mono text-[9px] leading-relaxed text-[#a5afa1]">{githubData.readme}</pre>
+        </details>}
+        <a className="mt-2 inline-flex text-[10px] text-[var(--accent)] underline-offset-4 hover:underline" href={`https://github.com/${encodeURIComponent(githubData.username)}/${encodeURIComponent(githubData.username)}#readme`} target="_blank" rel="noopener noreferrer">Open profile README</a>
+      </section>}
       <div className="profile-card-foot">Made with <b>gitprofiles.xyz</b></div>
     </article>
+  </div>;
+}
+
+function GithubLanguageList({ languages, compact = false }: { languages: GithubLanguage[]; compact?: boolean }) {
+  if (!languages.length) return <p className="text-xs text-[var(--muted)]">No language data in public repositories yet.</p>;
+  return <div className={compact ? "grid gap-2" : "grid gap-2.5"}>
+    {languages.map((language) => <div key={language.name} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1">
+      <span className={compact ? "text-[10px] text-[#d0d7ca]" : "text-xs text-[var(--soft)]"}>{language.name}</span>
+      <span className="font-mono text-[9px] text-[var(--muted)]">{language.repositories} {language.repositories === 1 ? "repo" : "repos"}</span>
+      <span className="col-span-2 h-1 overflow-hidden rounded-full bg-white/10"><span className="block h-full rounded-full bg-[var(--accent)]" style={{ width: `${language.share}%` }} /></span>
+    </div>)}
   </div>;
 }
 
