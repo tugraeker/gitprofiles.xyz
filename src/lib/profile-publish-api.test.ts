@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_PROFILE } from "../model";
-import publishEndpoint from "../../api/publish-profile";
+import { POST as publishEndpoint } from "../../api/publish-profile";
 
 describe("authenticated profile relay", () => {
   afterEach(() => {
@@ -26,7 +26,7 @@ describe("authenticated profile relay", () => {
       headers: { authorization: "Bearer eyJ.test.token", origin: "https://gitprofiles-xyz.vercel.app", "content-type": "application/json" },
       body: JSON.stringify(maliciousDraft)
     });
-    const response = await publishEndpoint.fetch(request);
+    const response = await publishEndpoint(request);
     expect(calls.length, await response.clone().text()).toBe(2);
     const savedRow = JSON.parse(String(calls[1].init?.body));
 
@@ -42,11 +42,11 @@ describe("authenticated profile relay", () => {
 
   it("rejects missing sessions and cross-origin requests before calling Supabase", async () => {
     vi.stubGlobal("fetch", vi.fn());
-    const unauthenticated = await publishEndpoint.fetch(new Request("https://gitprofiles-xyz.vercel.app/api/publish-profile", {
+    const unauthenticated = await publishEndpoint(new Request("https://gitprofiles-xyz.vercel.app/api/publish-profile", {
       method: "POST",
       body: JSON.stringify(DEFAULT_PROFILE)
     }));
-    const crossOrigin = await publishEndpoint.fetch(new Request("https://gitprofiles-xyz.vercel.app/api/publish-profile", {
+    const crossOrigin = await publishEndpoint(new Request("https://gitprofiles-xyz.vercel.app/api/publish-profile", {
       method: "POST",
       headers: { authorization: "Bearer eyJ.test.token", origin: "https://attacker.invalid" },
       body: JSON.stringify(DEFAULT_PROFILE)

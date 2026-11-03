@@ -16,8 +16,7 @@ function normalizeUsername(value: string): string {
 
 const reservedUsernames = new Set(["admin", "api", "auth", "dashboard", "login", "logout", "settings", "static", "assets", "favicon.ico", "robots.txt"]);
 
-export default {
-  async fetch(request: Request): Promise<Response> {
+export async function POST(request: Request): Promise<Response> {
     if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
     const requestOrigin = new URL(request.url).origin;
     const originHeader = request.headers.get("origin");
@@ -81,5 +80,4 @@ export default {
     } catch {
       return json({ error: "The server could not reach Supabase. Your profile was not saved." }, 502);
     }
-  }
-};
+}
