@@ -1,0 +1,12 @@
+node_modules/
+dist/
+release/
+native/target/
+native/index.d.ts
+native/*.node
+.transaction/
+coverage/
+*.log
+.env
+.env.*
+!.env.example
