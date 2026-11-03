@@ -5,6 +5,7 @@ native/target/
 native/index.d.ts
 native/*.node
 .transaction/
+supabase/.temp/
 coverage/
 *.log
 .env
