@@ -5,7 +5,14 @@ import { GET as cardEndpoint } from "../../api/profile-card";
 
 describe("README profile card endpoint", () => {
   it("serves a self-contained SVG card with cache headers", async () => {
-    const profile = { ...DEFAULT_PROFILE, name: "Ari Developer" };
+    const profile = {
+      ...DEFAULT_PROFILE,
+      username: "aridev",
+      name: "Ari Developer",
+      avatar: "https://avatars.githubusercontent.com/u/42?v=4",
+      links: [{ id: "portfolio", title: "Portfolio", subtitle: "", url: "https://ari.example/work", icon: "link" as const }],
+      socials: { github: "aridev", x: "", instagram: "", discord: "" }
+    };
     const request = new Request("https://gitprofiles-xyz.vercel.app/api/profile-card?profile=" + encodeProfile(profile));
     const response = cardEndpoint(request);
     const svg = await response.text();
@@ -14,6 +21,10 @@ describe("README profile card endpoint", () => {
     expect(response.headers.get("cache-control")).toContain("s-maxage=300");
     expect(svg).toContain("<svg");
     expect(svg).toContain("Ari Developer");
+    expect(svg).toContain('<image href="https://avatars.githubusercontent.com/u/42?v=4"');
+    expect(svg).toContain('href="https://ari.example/work"');
+    expect(svg).toContain("Portfolio");
+    expect(svg).toContain("GitHub");
   });
 
   it("escapes untrusted profile text before returning SVG", async () => {

@@ -15,15 +15,25 @@ describe("shareable profiles", () => {
     expect(readSharedProfile(url)?.username).toBe(DEFAULT_PROFILE.username);
   });
 
-  it("creates a self-contained hosted profile card URL without embedding uploaded image data", () => {
-    const profile = { ...DEFAULT_PROFILE, avatar: "data:image/png;base64,AA==" };
+  it("keeps compact avatars and profile links in hosted cards while dropping oversized uploads", () => {
+    const profile = {
+      ...DEFAULT_PROFILE,
+      name: "Ari Developer",
+      username: "aridev",
+      avatar: "data:image/png;base64,AA==",
+      links: [{ id: "portfolio", title: "Portfolio", subtitle: "", url: "https://ari.example/work", icon: "link" as const }],
+      socials: { github: "aridev", x: "", instagram: "", discord: "" }
+    };
     const cardUrl = profileCardImageUrl("https://gitprofiles-xyz.vercel.app", profile);
     const parsed = new URL(cardUrl);
     expect(parsed.pathname).toBe("/api/profile-card");
     expect(decodeProfile(parsed.searchParams.get("profile")!)?.name).toBe(profile.name);
-    expect(decodeProfile(parsed.searchParams.get("profile")!)?.avatar).toBe("");
-    expect(decodeProfile(parsed.searchParams.get("profile")!)?.links).toEqual([]);
-    expect(decodeProfile(parsed.searchParams.get("profile")!)?.socials.github).toBe("");
+    expect(decodeProfile(parsed.searchParams.get("profile")!)?.avatar).toBe(profile.avatar);
+    expect(decodeProfile(parsed.searchParams.get("profile")!)?.links[0]?.title).toBe("Portfolio");
+    expect(decodeProfile(parsed.searchParams.get("profile")!)?.socials.github).toBe("aridev");
+
+    const oversized = profileCardImageUrl("https://gitprofiles-xyz.vercel.app", { ...profile, avatar: "data:image/png;base64," + "A".repeat(8000) });
+    expect(decodeProfile(new URL(oversized).searchParams.get("profile")!)?.avatar).toBe("");
   });
 
   it("creates copy-ready README image embeds and an SVG card", () => {
