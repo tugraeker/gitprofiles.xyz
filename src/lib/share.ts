@@ -1,4 +1,4 @@
-import { DEFAULT_PROFILE, THEMES, type BackgroundKind, type Profile, type ProfileLink, type SocialKey } from "../model";
+import { DEFAULT_PROFILE, THEMES, type BackgroundKind, type Profile, type ProfileLink, type SocialKey } from "../model.js";
 
 const SOCIAL_KEYS: SocialKey[] = ["github", "x", "instagram", "discord"];
 const COLOR = /^#[0-9a-f]{6}$/i;

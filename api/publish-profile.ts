@@ -1,4 +1,4 @@
-import { normalizeProfile, validateShareableProfile } from "../src/lib/share";
+import { normalizeProfile, validateShareableProfile } from "../src/lib/share.js";
 
 type SupabaseAuthUser = { id?: string };
 type SupabaseErrorBody = { code?: string; message?: string };

@@ -1,4 +1,4 @@
-import { createProfileCardSvg, decodeProfile } from "../src/lib/share";
+import { createProfileCardSvg, decodeProfile } from "../src/lib/share.js";
 
 export function GET(request: Request): Response {
   const url = new URL(request.url);
