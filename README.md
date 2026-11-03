@@ -32,10 +32,10 @@ npm run dev
 ```sh
 VITE_SUPABASE_URL=https://<project-ref>.supabase.co
 VITE_SUPABASE_ANON_KEY=<public-anon-key>
-VITE_PUBLIC_URL=https://gitprofiles.xyz
+VITE_PUBLIC_URL=
 ```
 
-5. Supabase projesinde GitHub sağlayıcısını etkinleştir. OAuth client secret yalnızca Supabase sağlayıcı ayarlarında tutulur; renderer'a veya repoya eklenmez.
+5. Supabase projesinde GitHub sağlayıcısını etkinleştir. OAuth client secret yalnızca Supabase sağlayıcı ayarlarında tutulur; renderer'a veya repoya eklenmez. Vercel ortamında `VITE_PUBLIC_URL` boş bırakılırsa uygulama mevcut dağıtım origin'ini kullanır; özel domain bağlandığında bu değişkene o domain yazılabilir.
 
 Geliştirme ortamında ayarları tamamlayınca `npm run dev` ile web veya Electron akışından giriş yapabilirsin. Auth callback'teki PKCE kodu istemci SDK'siyle değiştirilir. Electron preload sadece dışarıda GitHub/Supabase adresini açma, doğrulama ve auth callback dinleme kabiliyetlerini renderer'a sunar; Node entegrasyonu kapalı ve context isolation açıktır.
 
