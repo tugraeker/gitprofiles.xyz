@@ -10,8 +10,7 @@
     "noEmit": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
-    "allowImportingTsExtensions": true,
-    "types": ["vite/client", "vitest/globals"]
+    "allowImportingTsExtensions": true
   },
   "include": ["src"]
 }
