@@ -9,7 +9,7 @@ import {
 import type { Session } from "@supabase/supabase-js";
 import { DEFAULT_PROFILE, SOCIAL_LABELS, THEMES, type BackgroundMode, type LinkIcon, type Profile, type ProfileLink, type SocialKey, type ThemeId } from "./model";
 import {
-  createProfileCardSvg, htmlEmbed, markdownEmbed,
+  createProfileCardSvg, htmlEmbed, markdownEmbed, profileCardImageUrl, makeShareUrl,
   normalizeProfile, readSharedProfile, safeHttpUrl, validateShareableProfile
 } from "./lib/share";
 import { blankProfile, exchangeAuthCode, githubProfile, loadOwnProfile, loadPublicProfile, profileRoute, publishProfile, signInWithGitHub, uploadProfileMedia, validateUsername } from "./lib/profile-service";
@@ -109,7 +109,16 @@ function copyText(value: string): Promise<void> {
 
 function isNetworkFailure(error: unknown): boolean {
   const message = error instanceof Error ? error.message : typeof error === "object" && error !== null && "message" in error ? String(error.message) : String(error);
-  return /networkerror|failed to fetch|fetch failed|load failed|network request failed/i.test(message);
+  const name = error instanceof Error ? error.name : typeof error === "object" && error !== null && "name" in error ? String(error.name) : "";
+  return name === "NetworkError" || /networkerror|failed to fetch|fetch failed|load failed|network request failed/i.test(message);
+}
+
+function publicShareOrigin(): string {
+  return import.meta.env.VITE_PUBLIC_URL?.replace(/\/$/, "") || (window.location.protocol === "file:" ? "https://gitprofiles.xyz" : window.location.origin);
+}
+
+function shareableDraftProfile(profile: Profile): Profile {
+  return /^data:image\/(?:png|jpe?g|webp);base64,/i.test(profile.avatar) ? { ...profile, avatar: "" } : profile;
 }
 
 async function withSupabaseRetry<T>(operation: () => Promise<T>, message: string): Promise<T> {
@@ -123,8 +132,43 @@ async function withSupabaseRetry<T>(operation: () => Promise<T>, message: string
       await new Promise((resolve) => window.setTimeout(resolve, 450 * (attempt + 1)));
     }
   }
-  if (isNetworkFailure(lastError)) throw new Error(message);
+  if (isNetworkFailure(lastError)) {
+    const failure = new Error(message, { cause: lastError });
+    failure.name = "NetworkError";
+    throw failure;
+  }
   throw lastError;
+}
+
+async function publishProfileThroughSite(session: Session, profile: Profile): Promise<void> {
+  const endpoint = new URL("/api/publish-profile", window.location.href);
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer " + session.access_token },
+    body: JSON.stringify(profile)
+  });
+  const result = await response.json().catch(() => null) as { error?: string; saved?: boolean } | null;
+  if (!response.ok || !result || result.saved !== true) {
+    const failure = new Error(result?.error || "Profil sunucu üzerinden kaydedilemedi.");
+    if (response.status >= 500 || response.status === 404 || (response.status === 200 && !result)) failure.name = "NetworkError";
+    throw failure;
+  }
+}
+
+async function publishProfileWithRecovery(session: Session, profile: Profile): Promise<void> {
+  try {
+    await withSupabaseRetry(() => publishProfile(session.user.id, profile), "Profil Supabase'e gönderilemedi.");
+  } catch (error) {
+    if (!isNetworkFailure(error) || window.location.protocol === "file:") throw error;
+    try {
+      await publishProfileThroughSite(session, profile);
+    } catch (relayError) {
+      if (!isNetworkFailure(relayError)) throw relayError;
+      const failure = new Error("Supabase’e doğrudan ve sunucu üzerinden ulaşılamadı.", { cause: relayError });
+      failure.name = "NetworkError";
+      throw failure;
+    }
+  }
 }
 
 function saveProfileLocally(profile: Profile): boolean {
@@ -201,6 +245,7 @@ function App() {
   const [notice, setNotice] = useState<Notice>(null);
   const [shareOpen, setShareOpen] = useState(false);
   const [shareUrl, setShareUrl] = useState("");
+  const [shareIsDraft, setShareIsDraft] = useState(false);
   const [embedMode, setEmbedMode] = useState<"markdown" | "html">("markdown");
   const [avatarBusy, setAvatarBusy] = useState(false);
   const [githubData, setGithubData] = useState<GithubShowcase | null>(null);
@@ -209,7 +254,9 @@ function App() {
   const [githubRefresh, setGithubRefresh] = useState(0);
   const lastPublishedFingerprint = useRef("");
   const autoSaveQueue = useRef<Promise<void>>(Promise.resolve());
-  const embedCode = useMemo(() => embedMode === "markdown" ? markdownEmbed(profile, shareUrl) : htmlEmbed(profile, shareUrl), [embedMode, profile, shareUrl]);
+  const cardImageUrl = useMemo(() => profileCardImageUrl(publicShareOrigin(), shareableDraftProfile(profile)), [profile]);
+  const cardPreview = useMemo(() => "data:image/svg+xml;charset=utf-8," + encodeURIComponent(createProfileCardSvg(profile)), [profile]);
+  const embedCode = useMemo(() => embedMode === "markdown" ? markdownEmbed(profile, shareUrl, cardImageUrl) : htmlEmbed(profile, shareUrl, cardImageUrl), [embedMode, profile, shareUrl, cardImageUrl]);
   const rootStyle = { "--accent": profile.accent, "--profile-background": backgroundStyle(profile) } as CSSProperties;
   const githubUsername = githubUsernameFrom(profile.socials.github);
 
@@ -310,7 +357,7 @@ function App() {
       autoSaveQueue.current = autoSaveQueue.current.catch(() => {}).then(async () => {
         if (!active) return;
         try {
-          await withSupabaseRetry(() => publishProfile(session.user.id, profile), "Profil güncellenemedi. Supabase bağlantısını kontrol edip tekrar dene.");
+          await publishProfileWithRecovery(session, profile);
           if (active) lastPublishedFingerprint.current = serialized;
         } catch (error) {
           if (active) setNotice({ type: "error", text: error instanceof Error ? error.message : "Live profile update failed." });
@@ -487,9 +534,22 @@ function App() {
     setNotice({ type: "success", text: "Oturum kapatıldı." });
   }
 
+  function shareDraft() {
+    const issue = validateShareableProfile(profile) || validateUsername(profile.username);
+    if (issue) {
+      setNotice({ type: "error", text: issue });
+      return;
+    }
+    const url = makeShareUrl(publicShareOrigin(), shareableDraftProfile(profile));
+    setShareUrl(url);
+    setShareIsDraft(true);
+    setShareOpen(true);
+    setNotice({ type: "info", text: "Profil bağlantısı hazır. Bu taslak Supabase’e kaydedilmedi; bağlantı profil verisini taşır." });
+  }
+
   async function saveAndShare() {
     if (!session) {
-      await startSignIn();
+      shareDraft();
       return;
     }
     const issue = validateShareableProfile(profile);
@@ -525,16 +585,26 @@ function App() {
         candidate = { ...candidate, avatar: await withSupabaseRetry(() => uploadProfileMedia(session.user.id, avatarFile, "avatar"), "Profil görseli yüklenemedi. Supabase bağlantısını kontrol edip tekrar dene.") };
         setProfile(candidate);
       }
-      await withSupabaseRetry(() => publishProfile(session.user.id, candidate), "Profil Supabase'e gönderilemedi. İnternet bağlantını ve Supabase erişimini kontrol edip tekrar dene.");
+      await publishProfileWithRecovery(session, candidate);
       lastPublishedFingerprint.current = JSON.stringify(candidate);
       setIsPublished(true);
-      const publicOrigin = import.meta.env.VITE_PUBLIC_URL?.replace(/\/$/, "") || (window.location.protocol === "file:" ? "https://gitprofiles.xyz" : window.location.origin);
-      const url = publicOrigin + "/" + candidate.username;
+      const url = publicShareOrigin() + "/" + candidate.username;
+      setShareIsDraft(false);
       setShareUrl(url);
       setShareOpen(true);
       setNotice({ type: "success", text: "Profil yayınlandı. Herkese açık adresin hazır." });
     } catch (error) {
-      setNotice({ type: "error", text: error instanceof Error ? error.message : "Profil yayınlanamadı." });
+      const fallbackUrl = makeShareUrl(publicShareOrigin(), shareableDraftProfile(profile));
+      setShareUrl(fallbackUrl);
+      setShareIsDraft(true);
+      setIsPublished(false);
+      setShareOpen(true);
+      if (isNetworkFailure(error)) {
+        setNotice({ type: "info", text: "Supabase’e ulaşılamadı. Profilini taşıyan paylaşım linki ve README kartı hazır; buluta kaydedilmedi." });
+      } else {
+        const reason = error instanceof Error ? error.message : "Profil yayınlanamadı.";
+        setNotice({ type: "error", text: reason + " Taslak paylaşım linki hazır." });
+      }
     } finally {
       setAccountBusy(false);
     }
@@ -595,7 +665,7 @@ function App() {
         <div className="topbar-actions">
           <button className="icon-button appearance-toggle" aria-label={appearance === "dark" ? "Switch to light theme" : "Switch to dark theme"} title={appearance === "dark" ? "Light theme" : "Dark theme"} onClick={() => setAppearance(appearance === "dark" ? "light" : "dark")}>{appearance === "dark" ? <Sun size={15} /> : <Moon size={15} />}</button>
           {session ? <button className="button button-quiet account-button" onClick={() => void signOut()}><LogOut size={14} /> Sign out</button> : <button className="button button-quiet account-button" disabled={authLoading || accountBusy} onClick={() => void startSignIn()}><SocialGlyph kind="github" /> Sign in with GitHub</button>}
-          <button className="button button-save" disabled={accountBusy || authLoading} onClick={() => void saveAndShare()}>{session ? <Share2 size={15} /> : <SocialGlyph kind="github" />}{accountBusy ? "Saving…" : session ? "Publish profile" : "Sign in to publish"}</button>
+          <button className="button button-save" disabled={accountBusy || authLoading} onClick={() => void saveAndShare()}>{session ? <Share2 size={15} /> : <Link2 size={14} />}{accountBusy ? "Saving…" : session ? "Publish profile" : "Share profile"}</button>
         </div>
       </header>
 
@@ -725,7 +795,7 @@ function App() {
       </main>
 
       {notice && <div className={"notice-toast " + notice.type} role="status" aria-live="polite"><span>{notice.type === "success" ? <Check size={14} /> : notice.type === "error" ? <X size={14} /> : <Info size={14} />}</span>{notice.text}<button aria-label="Dismiss notice" onClick={() => setNotice(null)}><X size={13} /></button></div>}
-      {shareOpen && <ShareDialog profile={profile} url={shareUrl} embedMode={embedMode} setEmbedMode={setEmbedMode} code={embedCode} onClose={() => setShareOpen(false)} onCopy={copy} onDownload={downloadCard} />}
+      {shareOpen && <ShareDialog profile={profile} url={shareUrl} embedMode={embedMode} setEmbedMode={setEmbedMode} code={embedCode} cardPreview={cardPreview} shareIsDraft={shareIsDraft} onClose={() => setShareOpen(false)} onCopy={copy} onDownload={downloadCard} />}
     </div>
   );
 }
@@ -884,21 +954,22 @@ function GithubLanguageList({ languages, compact = false }: { languages: GithubL
   </div>;
 }
 
-function ShareDialog({ profile, url, embedMode, setEmbedMode, code, onClose, onCopy, onDownload }: {
+function ShareDialog({ profile, url, embedMode, setEmbedMode, code, cardPreview, shareIsDraft, onClose, onCopy, onDownload }: {
   profile: Profile; url: string; embedMode: "markdown" | "html"; setEmbedMode: (mode: "markdown" | "html") => void;
-  code: string; onClose: () => void; onCopy: (value: string, label: string) => void; onDownload: () => void;
+  code: string; cardPreview: string; shareIsDraft: boolean; onClose: () => void; onCopy: (value: string, label: string) => void; onDownload: () => void;
 }) {
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="share-dialog" role="dialog" aria-modal="true" aria-labelledby="share-title">
       <div className="dialog-head"><div><span className="dialog-icon"><Share2 size={16} /></span><div><h2 id="share-title">Your page is ready to travel.</h2><p>One link for your whole corner of the internet.</p></div></div><button className="icon-button" onClick={onClose} aria-label="Close share dialog"><X size={16} /></button></div>
       <div className="share-url-row"><div className="share-url-field" aria-label="Generated share URL"><span>{url}</span></div><button className="button button-save" onClick={() => onCopy(url, "Profile link")}><Copy size={14} /> Copy link</button></div>
-      <div className="share-note"><span className="note-pulse" /> This link opens your published profile. Later edits appear after a short save.</div>
+      <div className="share-note"><span className="note-pulse" />{shareIsDraft ? "Draft share link; the profile travels in the URL and is not saved to Supabase." : "This link opens your published profile. Later edits appear after a short save."}</div>
       <div className="embed-section">
-        <div className="embed-head"><div><b>Put your card in a GitHub README</b><small>Upload the SVG card to your repo, then paste a snippet.</small></div><div className="embed-tabs"><button className={embedMode === "markdown" ? "active" : ""} onClick={() => setEmbedMode("markdown")}>Markdown</button><button className={embedMode === "html" ? "active" : ""} onClick={() => setEmbedMode("html")}>HTML</button></div></div>
+        <div className="embed-head"><div><b>Put your card in a GitHub README</b><small>Preview it here, then paste the snippet. No image upload is required.</small></div><div className="embed-tabs"><button className={embedMode === "markdown" ? "active" : ""} onClick={() => setEmbedMode("markdown")}>Markdown</button><button className={embedMode === "html" ? "active" : ""} onClick={() => setEmbedMode("html")}>HTML</button></div></div>
+        <div className="share-card-preview"><img src={cardPreview} alt={profile.name + " profile card preview"} /></div>
         <textarea className="embed-code" value={code} readOnly aria-label={embedMode + " embed code"} spellCheck={false} />
-        <div className="embed-actions"><button className="button button-quiet" onClick={() => onCopy(code, embedMode + " embed code")}><Copy size={13} /> Copy code</button><button className="button button-quiet" onClick={onDownload}><Download size={13} /> Download SVG card</button></div>
+        <div className="embed-actions"><button className="button button-quiet" onClick={() => onCopy(code, embedMode + " embed code")}><Copy size={13} /> Copy README code</button><button className="button button-quiet" onClick={onDownload}><Download size={13} /> Download SVG</button></div>
       </div>
-      <div className="dialog-footer"><span>Change the image path to match where you upload the SVG.</span><button onClick={onClose}>Done</button></div>
+      <div className="dialog-footer"><span>Paste this code in your GitHub profile README.md.</span><button onClick={onClose}>Done</button></div>
     </section>
   </div>;
 }

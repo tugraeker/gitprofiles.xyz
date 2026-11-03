@@ -23,7 +23,7 @@ describe("developer profile studio", () => {
     expect(html).toContain("Set the essentials");
     expect(html).toContain("Live preview");
     expect(html).toContain("Sign in with GitHub");
-    expect(html).toContain("Sign in to publish");
+    expect(html).toContain("Share profile");
     expect(html).toContain("gitprofiles.xyz/<!-- -->your-name");
     expect(html).toContain("Image");
     expect(html).toContain("Video");

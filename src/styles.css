@@ -2095,3 +2095,18 @@ a {
     animation-duration: .01ms !important;
   }
 }
+
+.share-card-preview {
+  margin: 0 0 10px;
+  overflow: hidden;
+  border: 1px solid #39463b;
+  border-radius: 5px;
+  background: #101713;
+}
+
+.share-card-preview img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1200 / 630;
+  object-fit: cover;
+}

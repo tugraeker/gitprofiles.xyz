@@ -146,6 +146,23 @@ export function createProfileCardSvg(profile: Profile): string {
   ].join("");
 }
 
+export function profileCardImageUrl(baseUrl: string, profile: Profile): string {
+  const shareProfile = {
+    ...profile,
+    bio: "",
+    location: "",
+    avatar: "",
+    backgroundKind: "color" as const,
+    backgroundImage: "",
+    backgroundVideo: "",
+    links: [],
+    socials: { github: "", x: "", instagram: "", discord: "" }
+  };
+  const url = new URL("/api/profile-card", baseUrl);
+  url.searchParams.set("profile", encodeProfile(shareProfile));
+  return url.href;
+}
+
 export function markdownEmbed(profile: Profile, shareUrl: string, imagePath = "./profile-card.svg"): string {
   const alt = (profile.name.trim() || "Developer profile").replace(/[\[\]]/g, "");
   return "[![" + alt + " — gitprofiles.xyz](" + imagePath + ")](" + shareUrl + ")";

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_PROFILE } from "../model";
-import { createProfileCardSvg, decodeProfile, encodeProfile, htmlEmbed, makeShareUrl, markdownEmbed, readSharedProfile } from "./share";
+import { createProfileCardSvg, decodeProfile, encodeProfile, htmlEmbed, makeShareUrl, markdownEmbed, profileCardImageUrl, readSharedProfile } from "./share";
 
 describe("shareable profiles", () => {
   it("round-trips Unicode profile data and custom links", () => {
@@ -13,6 +13,17 @@ describe("shareable profiles", () => {
     const url = makeShareUrl("https://gitprofiles.xyz/", DEFAULT_PROFILE);
     expect(new URL(url).searchParams.get("view")).toBe("1");
     expect(readSharedProfile(url)?.username).toBe(DEFAULT_PROFILE.username);
+  });
+
+  it("creates a self-contained hosted profile card URL without embedding uploaded image data", () => {
+    const profile = { ...DEFAULT_PROFILE, avatar: "data:image/png;base64,AA==" };
+    const cardUrl = profileCardImageUrl("https://gitprofiles-xyz.vercel.app", profile);
+    const parsed = new URL(cardUrl);
+    expect(parsed.pathname).toBe("/api/profile-card");
+    expect(decodeProfile(parsed.searchParams.get("profile")!)?.name).toBe(profile.name);
+    expect(decodeProfile(parsed.searchParams.get("profile")!)?.avatar).toBe("");
+    expect(decodeProfile(parsed.searchParams.get("profile")!)?.links).toEqual([]);
+    expect(decodeProfile(parsed.searchParams.get("profile")!)?.socials.github).toBe("");
   });
 
   it("creates copy-ready README image embeds and an SVG card", () => {
